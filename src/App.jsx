@@ -1,23 +1,70 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import UploadPanel from './components/UploadPanel.jsx'
+import JenkinsPanel from './components/JenkinsPanel.jsx'
+import SettingsPanel, { getSettings } from './components/SettingsPanel.jsx'
 import AnalysisPanel from './components/AnalysisPanel.jsx'
 import ExecutionPanel from './components/ExecutionPanel.jsx'
+import DiffViewer from './components/DiffViewer.jsx'
+import HistoryPanel from './components/HistoryPanel.jsx'
 import { STEPS, STEP_LOGS } from './components/ExecutionPanel.jsx'
+import { saveSession, updateSessionStatus, getAllSessions } from './utils/database.js'
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function App() {
-  const [uploadedFiles, setUploadedFiles] = useState([])
-  const [isRunning, setIsRunning] = useState(false)
-  const [isComplete, setIsComplete] = useState(false)
+  const [scanResult, setScanResult]     = useState(null)
+  const [isScanning, setIsScanning]     = useState(false)
+  const [scanError, setScanError]       = useState('')
+  const [isRunning, setIsRunning]       = useState(false)
+  const [isComplete, setIsComplete]     = useState(false)
   const [stepStatuses, setStepStatuses] = useState({})
-  const [logs, setLogs] = useState([])
+  const [logs, setLogs]                 = useState([])
+  const [sessionId, setSessionId]       = useState(null)
+  const [sessionCount, setSessionCount] = useState(0)
+  const [resetKey, setResetKey]         = useState(0)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [settings, setSettings]         = useState(() => getSettings())
 
   const appendLog = useCallback((line) => {
     setLogs(prev => [...prev, line])
   }, [])
+
+  useEffect(() => {
+    getAllSessions().then(s => setSessionCount(s.length))
+  }, [])
+
+  async function handleProjectScanned(projectPath) {
+    setIsScanning(true)
+    setScanError('')
+    setScanResult(null)
+
+    try {
+      const response = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath })
+      })
+
+      if (!response.ok) {
+        const err = await response.json()
+        throw new Error(err.error || 'Scan failed')
+      }
+
+      const result = await response.json()
+      setScanResult(result)
+
+      const id = await saveSession(result)
+      setSessionId(id)
+      setSessionCount(prev => prev + 1)
+
+    } catch (err) {
+      setScanError(err.message || 'Failed to scan project')
+    } finally {
+      setIsScanning(false)
+    }
+  }
 
   async function handleStartMigration() {
     if (isRunning) return
@@ -27,7 +74,8 @@ function App() {
     setStepStatuses({})
     setLogs([])
 
-    // Scroll to top so execution panel is visible
+    if (sessionId) await updateSessionStatus(sessionId, 'running')
+
     window.scrollTo({ top: 0, behavior: 'smooth' })
 
     for (const step of STEPS) {
@@ -46,21 +94,56 @@ function App() {
 
     setIsRunning(false)
     setIsComplete(true)
+
+    if (sessionId) await updateSessionStatus(sessionId, 'complete')
   }
 
   function handleReset() {
-    setUploadedFiles([])
+    setScanResult(null)
+    setScanError('')
     setStepStatuses({})
     setLogs([])
     setIsRunning(false)
     setIsComplete(false)
+    setSessionId(null)
+    setResetKey(prev => prev + 1)
   }
 
-  const headerStatus = isRunning ? 'Running' : isComplete ? 'Complete' : 'Ready'
-  const headerColor = isRunning ? 'bg-amber-400' : isComplete ? 'bg-emerald-400' : 'bg-emerald-400'
+  async function handleRestoreSession(session) {
+    try {
+      const response = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: session.project_path })
+      })
+      if (response.ok) {
+        const result = await response.json()
+        setScanResult(result)
+        setSessionId(session.id)
+        setScanError('')
+        setIsRunning(false)
+        setIsComplete(false)
+        setStepStatuses({})
+        setLogs([])
+        setResetKey(prev => prev + 1)
+      }
+    } catch (e) {
+      setScanError('Failed to restore session')
+    }
+  }
 
-  // Once migration starts, replace AnalysisPanel with ExecutionPanel in same spot
+  function handleSessionDeleted() {
+    setSessionCount(prev => prev - 1)
+  }
+
+  function handleSettingsClose() {
+    setIsSettingsOpen(false)
+    setSettings(getSettings()) // Re-read settings after save
+  }
+
   const migrationStarted = isRunning || isComplete
+  const headerStatus = isRunning ? 'Running' : isComplete ? 'Complete' : isScanning ? 'Scanning' : 'Ready'
+  const headerColor  = isRunning ? 'bg-amber-400' : isComplete ? 'bg-emerald-400' : isScanning ? 'bg-cyan-400' : 'bg-emerald-400'
 
   return (
     <div className="bg-slate-900 text-slate-100 min-h-screen">
@@ -72,7 +155,8 @@ function App() {
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-xl bg-gradient-to-br from-emerald-500 to-cyan-500 glow-effect">
                 <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/>
                 </svg>
               </div>
               <div>
@@ -80,8 +164,13 @@ function App() {
                 <p className="text-xs text-slate-400">AI-Powered Spring Migration Assistant</p>
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              {isComplete && (
+            <div className="flex items-center gap-3">
+              <HistoryPanel
+                onRestoreSession={handleRestoreSession}
+                sessionCount={sessionCount}
+                onSessionDeleted={handleSessionDeleted}
+              />
+              {(isComplete || scanResult) && (
                 <button
                   onClick={handleReset}
                   className="text-xs text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 px-3 py-1 rounded transition-all"
@@ -93,6 +182,16 @@ function App() {
                 <div className={`w-2 h-2 rounded-full ${headerColor} animate-pulse`}></div>
                 <span className="text-xs text-slate-400">{headerStatus}</span>
               </div>
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 p-1.5 rounded-lg transition-all"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+              </button>
               <span className="text-xs text-slate-500 border border-slate-700 px-2 py-1 rounded">v1.0.0</span>
             </div>
           </div>
@@ -101,24 +200,37 @@ function App() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
 
-        {/* Upload panel — always visible unless complete */}
         {!migrationStarted && (
-          <UploadPanel onFilesUploaded={(files) => {
-            setUploadedFiles(files)
-            setStepStatuses({})
-            setLogs([])
-            setIsComplete(false)
-          }} />
+          <>
+            <UploadPanel
+              onProjectScanned={handleProjectScanned}
+              isScanning={isScanning}
+              resetKey={resetKey}
+              autoScan={settings.autoScanOnUpload}
+            />
+            {scanError && (
+              <div className="p-4 bg-rose-500/10 rounded-xl border border-rose-500/30 text-rose-400 text-sm">
+                ⚠ {scanError}
+              </div>
+            )}
+          </>
         )}
 
-        {/* Before migration: show analysis + start button */}
-        {/* After migration starts: replace with execution panel */}
         {!migrationStarted ? (
-          <AnalysisPanel
-            files={uploadedFiles}
-            onStartMigration={handleStartMigration}
-            isRunning={isRunning}
-          />
+          <>
+            <AnalysisPanel
+              scanResult={scanResult}
+              onStartMigration={handleStartMigration}
+              isRunning={isRunning}
+            />
+            <DiffViewer scanResult={scanResult} />
+            <JenkinsPanel
+              isVisible={!!scanResult}
+              onBuildComplete={(result) => {
+                console.log('Build result:', result)
+              }}
+            />
+          </>
         ) : (
           <ExecutionPanel
             isRunning={isRunning}
@@ -135,6 +247,11 @@ function App() {
         )}
 
       </main>
+
+      <SettingsPanel
+        isOpen={isSettingsOpen}
+        onClose={handleSettingsClose}
+      />
 
     </div>
   )
