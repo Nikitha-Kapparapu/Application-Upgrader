@@ -35,3 +35,15 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
+// Phase 3 — Scanner IPC
+const { ipcMain } = require('electron');
+const { scanProject } = require('./scanner');
+
+ipcMain.handle('scan-project', async (event, projectPath) => {
+  try {
+    const result = await scanProject(projectPath);
+    return { success: true, data: result };
+  } catch (err) {
+    return { success: false, error: err };
+  }
+});
