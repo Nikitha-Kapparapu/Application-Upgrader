@@ -1,11 +1,10 @@
 import React, { useState, useCallback, useEffect } from 'react'
 import UploadPanel from './components/UploadPanel.jsx'
-import JenkinsPanel from './components/JenkinsPanel.jsx'
-import SettingsPanel, { getSettings } from './components/SettingsPanel.jsx'
 import AnalysisPanel from './components/AnalysisPanel.jsx'
 import ExecutionPanel from './components/ExecutionPanel.jsx'
 import DiffViewer from './components/DiffViewer.jsx'
 import HistoryPanel from './components/HistoryPanel.jsx'
+import SettingsPanel, { getSettings } from './components/SettingsPanel.jsx'
 import { STEPS, STEP_LOGS } from './components/ExecutionPanel.jsx'
 import { saveSession, updateSessionStatus, getAllSessions } from './utils/database.js'
 
@@ -14,18 +13,19 @@ function sleep(ms) {
 }
 
 function App() {
-  const [scanResult, setScanResult]     = useState(null)
-  const [isScanning, setIsScanning]     = useState(false)
-  const [scanError, setScanError]       = useState('')
-  const [isRunning, setIsRunning]       = useState(false)
-  const [isComplete, setIsComplete]     = useState(false)
-  const [stepStatuses, setStepStatuses] = useState({})
-  const [logs, setLogs]                 = useState([])
-  const [sessionId, setSessionId]       = useState(null)
-  const [sessionCount, setSessionCount] = useState(0)
-  const [resetKey, setResetKey]         = useState(0)
+  const [scanResult, setScanResult]         = useState(null)
+  const [isScanning, setIsScanning]         = useState(false)
+  const [scanError, setScanError]           = useState('')
+  const [isRunning, setIsRunning]           = useState(false)
+  const [isComplete, setIsComplete]         = useState(false)
+  const [stepStatuses, setStepStatuses]     = useState({})
+  const [logs, setLogs]                     = useState([])
+  const [sessionId, setSessionId]           = useState(null)
+  const [sessionCount, setSessionCount]     = useState(0)
+  const [resetKey, setResetKey]             = useState(0)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [settings, setSettings]         = useState(() => getSettings())
+  const [settings, setSettings]             = useState(() => getSettings())
+  const [completionStats, setCompletionStats] = useState(null)
 
   const appendLog = useCallback((line) => {
     setLogs(prev => [...prev, line])
@@ -35,6 +35,7 @@ function App() {
     getAllSessions().then(s => setSessionCount(s.length))
   }, [])
 
+  // ─── Scan Project ──────────────────────────────────────────────────────────
   async function handleProjectScanned(projectPath) {
     setIsScanning(true)
     setScanError('')
@@ -66,38 +67,233 @@ function App() {
     }
   }
 
+  // ─── Full Migration Pipeline ───────────────────────────────────────────────
   async function handleStartMigration() {
-    if (isRunning) return
+    if (isRunning || !scanResult) return
 
     setIsRunning(true)
     setIsComplete(false)
     setStepStatuses({})
     setLogs([])
+    setCompletionStats(null)
 
     if (sessionId) await updateSessionStatus(sessionId, 'running')
-
     window.scrollTo({ top: 0, behavior: 'smooth' })
 
-    for (const step of STEPS) {
-      setStepStatuses(prev => ({ ...prev, [step.key]: 'running' }))
+    const currentSettings = getSettings()
 
-      const stepLogs = STEP_LOGS[step.key] || []
-      for (const line of stepLogs) {
-        await sleep(180)
+    // ── Step 1: Scan Results ─────────────────────────────────────────────────
+    setStepStatuses(prev => ({ ...prev, scan: 'running' }))
+    for (const line of STEP_LOGS.scan) {
+      await sleep(150)
+      appendLog(line)
+    }
+    appendLog(`[SCAN] ${scanResult.totalIssues} issues found across ${scanResult.totalJavaFiles} Java files`)
+    appendLog(`[SCAN] Build system: ${scanResult.buildSystem} — Spring Boot ${scanResult.springBootVersion}`)
+    await sleep(300)
+    setStepStatuses(prev => ({ ...prev, scan: 'complete' }))
+    await sleep(200)
+
+    // ── Step 2: Claude AI ────────────────────────────────────────────────────
+    setStepStatuses(prev => ({ ...prev, claude: 'running' }))
+    appendLog('[AI] Connecting to Claude claude-sonnet-4...')
+    await sleep(300)
+
+    let migrationPlan = null
+    try {
+      const response = await fetch('/api/claude/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scanResult,
+          apiKey: currentSettings.claudeApiKey
+        })
+      })
+      const data = await response.json()
+
+      if (data.success && data.plan) {
+        migrationPlan = data.plan
+        const totalChanges = migrationPlan.files.reduce((s, f) => s + f.changes.length, 0)
+        appendLog(`[AI] Migration plan generated — ${migrationPlan.files.length} files, ${totalChanges} changes`)
+        appendLog(`[AI] ${migrationPlan.summary}`)
+        setStepStatuses(prev => ({ ...prev, claude: 'complete' }))
+      } else {
+        appendLog(`[AI] Error: ${data.error}`)
+        setStepStatuses(prev => ({ ...prev, claude: 'failed' }))
+        setIsRunning(false)
+        return
+      }
+    } catch (e) {
+      appendLog(`[AI] Failed: ${e.message}`)
+      setStepStatuses(prev => ({ ...prev, claude: 'failed' }))
+      setIsRunning(false)
+      return
+    }
+    await sleep(300)
+
+    // ── Step 3: Apply Changes ────────────────────────────────────────────────
+    setStepStatuses(prev => ({ ...prev, apply: 'running' }))
+    appendLog('[APPLY] Creating backup of original files...')
+    await sleep(400)
+
+    let applyData = null
+    try {
+      const response = await fetch('/api/apply-changes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectPath: scanResult.projectPath,
+          files: migrationPlan.files
+        })
+      })
+      applyData = await response.json()
+
+      if (applyData.success) {
+        for (const result of applyData.results) {
+          await sleep(100)
+          if (result.status === 'success') {
+            appendLog(`[APPLY] ${result.file} — ${result.changesApplied} changes applied ✓`)
+          } else if (result.status === 'skipped') {
+            appendLog(`[APPLY] ${result.file} — skipped (${result.reason})`)
+          } else {
+            appendLog(`[APPLY] ${result.file} — error: ${result.reason}`)
+          }
+        }
+        appendLog(`[APPLY] ${applyData.successCount}/${applyData.totalFiles} files updated ✓`)
+        appendLog(`[APPLY] Backup saved to .upgrader-backup/`)
+        setStepStatuses(prev => ({ ...prev, apply: 'complete' }))
+      } else {
+        appendLog(`[APPLY] Failed: ${applyData.error}`)
+        setStepStatuses(prev => ({ ...prev, apply: 'failed' }))
+        setIsRunning(false)
+        return
+      }
+    } catch (e) {
+      appendLog(`[APPLY] Failed: ${e.message}`)
+      setStepStatuses(prev => ({ ...prev, apply: 'failed' }))
+      setIsRunning(false)
+      return
+    }
+    await sleep(300)
+
+    // ── Step 4: Jenkins Build ────────────────────────────────────────────────
+    setStepStatuses(prev => ({ ...prev, jenkins: 'running' }))
+
+    const jenkinsConfig = JSON.parse(
+      localStorage.getItem('upgrader_jenkins_config') || '{}'
+    )
+    const useMock = !jenkinsConfig.jenkinsUrl || !jenkinsConfig.jobName
+    let buildStatus = 'SUCCESS'
+
+    if (useMock) {
+      appendLog('[JENKINS] No Jenkins configured — running mock build simulation...')
+      for (const line of STEP_LOGS.jenkins) {
+        await sleep(700)
         appendLog(line)
       }
+      setStepStatuses(prev => ({ ...prev, jenkins: 'complete' }))
+    } else {
+      appendLog(`[JENKINS] Connecting to ${jenkinsConfig.jenkinsUrl}...`)
+      try {
+        const triggerRes = await fetch('/api/jenkins/trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(jenkinsConfig)
+        })
+        const triggerData = await triggerRes.json()
 
-      await sleep(400)
-      setStepStatuses(prev => ({ ...prev, [step.key]: 'complete' }))
-      await sleep(200)
+        if (triggerData.success) {
+          appendLog('[JENKINS] Build triggered successfully')
+          let attempts = 0
+          let buildDone = false
+
+          while (!buildDone && attempts < 30) {
+            await sleep(5000)
+            attempts++
+
+            const statusRes = await fetch('/api/jenkins/status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(jenkinsConfig)
+            })
+            const statusData = await statusRes.json()
+
+            if (statusData.building) {
+              appendLog(`[JENKINS] Build #${statusData.buildNumber} running... (${attempts * 5}s)`)
+            } else if (statusData.result === 'SUCCESS') {
+              appendLog(`[JENKINS] Build #${statusData.buildNumber} — SUCCESS ✓`)
+              appendLog('')
+              appendLog('========================================')
+              appendLog('  MIGRATION COMPLETED SUCCESSFULLY')
+              appendLog('========================================')
+              buildDone = true
+              buildStatus = 'SUCCESS'
+              setStepStatuses(prev => ({ ...prev, jenkins: 'complete' }))
+            } else if (statusData.result === 'FAILURE') {
+              appendLog(`[JENKINS] Build #${statusData.buildNumber} — FAILED ✗`)
+              appendLog('[JENKINS] Check build logs for compile errors')
+              buildDone = true
+              buildStatus = 'FAILED'
+              setStepStatuses(prev => ({ ...prev, jenkins: 'failed' }))
+            }
+          }
+        } else {
+          appendLog(`[JENKINS] Trigger failed: ${triggerData.message}`)
+          setStepStatuses(prev => ({ ...prev, jenkins: 'failed' }))
+          buildStatus = 'FAILED'
+        }
+      } catch (e) {
+        appendLog(`[JENKINS] Connection failed: ${e.message}`)
+        setStepStatuses(prev => ({ ...prev, jenkins: 'failed' }))
+        buildStatus = 'FAILED'
+      }
     }
+
+    // ── Completion ───────────────────────────────────────────────────────────
+    const totalChanges = migrationPlan.files.reduce((s, f) => s + f.changes.length, 0)
+    setCompletionStats({
+      filesUpdated: applyData?.successCount || 0,
+      changesApplied: totalChanges,
+      buildStatus: buildStatus === 'SUCCESS' ? '✓ Pass' : '✗ Fail'
+    })
 
     setIsRunning(false)
     setIsComplete(true)
-
     if (sessionId) await updateSessionStatus(sessionId, 'complete')
   }
 
+  // ─── Restore Backup ───────────────────────────────────────────────────────
+  async function handleRestoreBackup() {
+    if (!scanResult) return
+    try {
+      const response = await fetch('/api/restore-backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: scanResult.projectPath })
+      })
+      const data = await response.json()
+      if (data.success) {
+        appendLog(`[RESTORE] ${data.restoredFiles} files restored from backup ✓`)
+        setIsComplete(false)
+        setStepStatuses({})
+        setLogs([])
+        setCompletionStats(null)
+      }
+    } catch (e) {
+      appendLog(`[RESTORE] Failed: ${e.message}`)
+    }
+  }
+
+  // ─── Open Project Folder ──────────────────────────────────────────────────
+  function handleOpenProject() {
+    if (!scanResult) return
+    // Copy path to clipboard
+    navigator.clipboard.writeText(scanResult.projectPath)
+      .then(() => appendLog(`[INFO] Project path copied to clipboard: ${scanResult.projectPath}`))
+      .catch(() => appendLog(`[INFO] Project path: ${scanResult.projectPath}`))
+  }
+
+  // ─── Reset ────────────────────────────────────────────────────────────────
   function handleReset() {
     setScanResult(null)
     setScanError('')
@@ -106,9 +302,11 @@ function App() {
     setIsRunning(false)
     setIsComplete(false)
     setSessionId(null)
+    setCompletionStats(null)
     setResetKey(prev => prev + 1)
   }
 
+  // ─── Restore Session ──────────────────────────────────────────────────────
   async function handleRestoreSession(session) {
     try {
       const response = await fetch('/api/scan', {
@@ -125,6 +323,7 @@ function App() {
         setIsComplete(false)
         setStepStatuses({})
         setLogs([])
+        setCompletionStats(null)
         setResetKey(prev => prev + 1)
       }
     } catch (e) {
@@ -138,7 +337,7 @@ function App() {
 
   function handleSettingsClose() {
     setIsSettingsOpen(false)
-    setSettings(getSettings()) // Re-read settings after save
+    setSettings(getSettings())
   }
 
   const migrationStarted = isRunning || isComplete
@@ -200,6 +399,7 @@ function App() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
 
+        {/* Upload — hidden once migration starts */}
         {!migrationStarted && (
           <>
             <UploadPanel
@@ -216,6 +416,8 @@ function App() {
           </>
         )}
 
+        {/* Pre-migration: Analysis + Diffs */}
+        {/* Post-migration: Execution panel */}
         {!migrationStarted ? (
           <>
             <AnalysisPanel
@@ -224,12 +426,6 @@ function App() {
               isRunning={isRunning}
             />
             <DiffViewer scanResult={scanResult} />
-            <JenkinsPanel
-              isVisible={!!scanResult}
-              onBuildComplete={(result) => {
-                console.log('Build result:', result)
-              }}
-            />
           </>
         ) : (
           <ExecutionPanel
@@ -237,12 +433,16 @@ function App() {
             isComplete={isComplete}
             stepStatuses={stepStatuses}
             logs={logs}
+            completionStats={completionStats}
             onBack={() => {
               setIsRunning(false)
               setIsComplete(false)
               setStepStatuses({})
               setLogs([])
+              setCompletionStats(null)
             }}
+            onRestoreBackup={handleRestoreBackup}
+            onOpenProject={handleOpenProject}
           />
         )}
 
