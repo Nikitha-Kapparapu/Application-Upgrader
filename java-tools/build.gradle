@@ -3,8 +3,17 @@ plugins {
     id 'application'
 }
 
+<<<<<<< HEAD
 application {
     mainClass = 'com.upgrader.ProjectScanner'
+=======
+group = 'com.upgrader'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+>>>>>>> upstream/feature-anil
 }
 
 repositories {
@@ -15,6 +24,13 @@ dependencies {
     implementation 'com.github.javaparser:javaparser-core:3.25.8'
 }
 
+<<<<<<< HEAD
+=======
+application {
+    mainClass = 'com.upgrader.ProjectScanner'
+}
+
+>>>>>>> upstream/feature-anil
 jar {
     manifest {
         attributes 'Main-Class': 'com.upgrader.ProjectScanner'
@@ -25,4 +41,8 @@ jar {
         }
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> upstream/feature-anil
